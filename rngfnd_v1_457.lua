@@ -33,38 +33,80 @@ local MAV_SEVERITY_DEBUG = 7
 local SCRIPT_NAME = "SD_CAN_DRIVER"
 ----------------------------------------
 
-local can_driver = CAN:get_device(20)
-
----@type BattMonitorScript_State_ud
-local BATT_TEMP_STATE_HERE
-
-local IS_HEREWIN_30AH = true
-
--- Global Variables
-local param_num_lua_rfnd_backend = 36
----@type AP_RangeFinder_Backend_ud
-local lua_rfnd_backend 
-local lua_rfnd_driver_found = false
-
--- GLOBAL COUNTER
-local DEBUG_MSG = 0
-
+---------- MAIN CONTROL ----------------
 -- UPDATE LOOP
 local loop_duration_ms = 1
 local UPDATE_FREQUENCY = 1000 -- freq = (1000/loop_duration_ms)
 
-local batt_counter = 2001
+--  CAN PORT
+local can_driver = CAN:get_device(20)
 
--- PARAMETERS
-local RNGFND1TYPE = Parameter()
-RNGFND1TYPE:init('RNGFND1_TYPE')
-
--- RNG ALTERNATIVE CONFIGURATIONS
+-- RANGEFINDER CONF
+local param_num_lua_rfnd_backend = 36
+---@type AP_RangeFinder_Backend_ud
+local lua_rfnd_backend 
+local lua_rfnd_driver_found = false
 local param_num_topradar_rfnd_backend = 26      -- Lanbao
 local param_num_nanoradar_rfnd_backend = 11     -- USD11
 local param_num_topradar_rfnd_can = 34          -- Benewake CAN Topradar TR24
 local param_num_lightware_rfnd = 8              -- Lightware Laser
 local isMicrobrainRFND = true
+
+-- PRX CONF
+local param_num_lua_prx_backend = 15
+---@type AP_Proximity_Backend_ud
+local lua_prx_backend
+local lua_prx_driver_found = false
+local prx_max_range = 20     -- max range of sensor [m]
+local prx_min_range = 1.5    -- minimum range of sensor [m]
+local param_num_topradar_prx_backend = 4        -- Lanbao
+local param_num_nanoradar_prx_backend = 3       -- TeraRangeFinder
+local isMicrobrainPRX = true
+local proximity_selector = 7
+
+-- BATT CONF
+---@type BattMonitorScript_State_ud
+local BATT_TEMP_STATE_HERE
+local IS_HEREWIN_30AH = true
+local batt_counter = 2001
+
+-- SMART BATTERY TATTU
+---@type BattMonitorScript_State_ud
+local BATT_TEMP_STATE
+local TENSAO_LSB = 0
+local CELL2LSB = 0
+local CELL9LSB = 0
+local BATT_MANUF = 0
+local BATT_MODEL = 0
+local BATT_FULL_14S = 0
+local BATT_CONSUMED_MAH_LSB = 0
+----------------------------------
+
+-- GLOBAL COUNTER
+local DEBUG_MSG = 0
+
+-- PARAMETERS CHEKC
+local RNGFND1TYPE = Parameter()
+RNGFND1TYPE:init('RNGFND1_TYPE')
+local PRX1TYPE = Parameter()
+PRX1TYPE:init('PRX1_TYPE')
+local PRXSELECTOR = Parameter()
+PRXSELECTOR:init('USR_SD_SEL')
+
+local LAST_LEVEL_BROADCASTED = true
+local FAIL_TIMER = 0
+local LAND_TIMER = 0
+local INFO_TIMER = 0
+local ALT_HOLD_TIMER = 0
+
+-- VEHICLE MODES
+local COPTER_LAND_MODE = 9
+local COPTER_ALT_HOLD = 2
+
+-- ULTRA FLOW 
+local CONT_FLOW_NOTIFY = 0
+
+local lastAccessParameters = millis()
 
 function SEND_MSG_WITH_REC(msg, notification_rate, globalCounter)
     local expireCount = UPDATE_FREQUENCY*notification_rate
@@ -97,6 +139,95 @@ end
 
 function GetBattVoltage(lsb, msb)
     return CombineBytes(lsb, msb)*0.001
+end
+
+------------------------------- RNGFND --------------------------------
+
+function Setup_rfnd_sensor()
+    if not can_driver then
+        gcs:send_text(MAV_SEVERITY_EMERGENCY, "No scripting CAN interface found")
+        return
+    end
+
+    local sensor_count = rangefinder:num_sensors() -- number of sensors connected
+    for j = 0, sensor_count-1 do
+        local device = rangefinder:get_backend(j)
+        if ((not lua_rfnd_driver_found) and device and (device:type() == param_num_lua_rfnd_backend)) then
+            -- LUA DRIVER
+            lua_rfnd_driver_found = true
+            lua_rfnd_backend = device
+        end
+    end
+    if not lua_rfnd_driver_found then
+        -- Could not find a lua backend
+        SEND_MSG_WITH_REC("CONFIGURE LUA RFND", 1, DEBUG_MSG)
+        return
+    end
+end
+
+function Parse_rfnd_can_frame(frame_rfnd)
+    local height_cm = (frame_rfnd:data(0)*256 + frame_rfnd:data(1))
+    return height_cm * 0.01
+end
+
+function Handle_rfnd_frame(frame_rfnd)
+    local rfnd_dist = Parse_rfnd_can_frame(frame_rfnd)
+
+    if (rfnd_dist >= 0) then
+        local sent_success = lua_rfnd_backend:handle_script_msg(rfnd_dist)
+        if not sent_success then
+            SEND_MSG_WITH_REC("RFND Lua Script Error", 1, DEBUG_MSG)
+            return
+        end
+    end
+end
+
+-------------------------------------- PRX -----------------------------------
+function Setup_prx_sensor()
+    if not can_driver then
+        gcs:send_text(MAV_SEVERITY_EMERGENCY, "No scripting CAN interface found")
+        return
+    end
+
+    local sensor_count_prx = proximity:num_sensors()
+    for j = 0, sensor_count_prx-1 do
+        local device_prx = proximity:get_backend(j)
+        if ((not lua_prx_driver_found) and device_prx and (device_prx:type() == param_num_lua_prx_backend)) then
+            -- LUA DRIVER
+            lua_prx_driver_found = true
+            lua_prx_backend = device_prx
+            lua_prx_backend:set_distance_min_max(prx_min_range, prx_max_range)
+        end
+    end
+    if not lua_prx_driver_found then
+        -- Could not find lua backend
+        gcs:send_text(MAV_SEVERITY_EMERGENCY, string.format("Configure Lua Proximity Sensor"))
+        return
+    end
+end
+
+function Parse_can_frame(frame_prx)
+    local object_x_cm = (frame_prx:data(0)*256 + frame_prx:data(1)) - 32768
+    local object_y_cm = (frame_prx:data(2)*256 + frame_prx:data(3))
+    return object_x_cm*0.01, object_y_cm*0.01
+end
+
+function Handle_prx_frame(frame_prx, prx_orientation_yaw_deg)
+
+    local object_x_cm, object_y_cm = Parse_can_frame(frame_prx)
+    local object_valid = false
+    if (object_y_cm >= 0) then
+        object_valid = true
+    end
+
+    if object_valid then
+        local object_distance = math.sqrt(object_x_cm * object_x_cm + object_y_cm * object_y_cm)
+        local sent_success = lua_prx_backend:handle_script_distance_msg(object_distance, prx_orientation_yaw_deg, 0, true)
+        if not sent_success then
+            gcs:send_text(MAV_SEVERITY_EMERGENCY, string.format("Proximity Lua Script Error"))
+            return
+        end
+    end
 end
 
 
@@ -163,45 +294,6 @@ end
 -- Corrente funciona em complemento de 2
 -- SOC = 0x3E = 62%
 -- SOH = 0x64 = 100%
-
-function Setup_rfnd_sensor()
-    if not can_driver then
-        gcs:send_text(MAV_SEVERITY_EMERGENCY, "No scripting CAN interface found")
-        return
-    end
-
-    local sensor_count = rangefinder:num_sensors() -- number of sensors connected
-    for j = 0, sensor_count-1 do
-        local device = rangefinder:get_backend(j)
-        if ((not lua_rfnd_driver_found) and device and (device:type() == param_num_lua_rfnd_backend)) then
-            -- LUA DRIVER
-            lua_rfnd_driver_found = true
-            lua_rfnd_backend = device
-        end
-    end
-    if not lua_rfnd_driver_found then
-        -- Could not find a lua backend
-        SEND_MSG_WITH_REC("CONFIGURE LUA RFND", 1, DEBUG_MSG)
-        return
-    end
-end
-
-function Parse_rfnd_can_frame(frame_rfnd)
-    local height_cm = (frame_rfnd:data(0)*256 + frame_rfnd:data(1))
-    return height_cm * 0.01
-end
-
-function Handle_rfnd_frame(frame_rfnd)
-    local rfnd_dist = Parse_rfnd_can_frame(frame_rfnd)
-
-    if (rfnd_dist >= 0) then
-        local sent_success = lua_rfnd_backend:handle_script_msg(rfnd_dist)
-        if not sent_success then
-            SEND_MSG_WITH_REC("RFND Lua Script Error", 1, DEBUG_MSG)
-            return
-        end
-    end
-end
 
 --handle Herewin Battery
 ---@param frame CANFrame_ud
@@ -294,8 +386,11 @@ function Update()
     local rng1 = RNGFND1TYPE:get()
     if rng1 == param_num_topradar_rfnd_backend or rng1 == param_num_nanoradar_rfnd_backend or
      rng1 == param_num_topradar_rfnd_can or rng1 == param_num_lightware_rfnd or rng1 == 0 then
-        
         isMicrobrainRFND = false
+    end
+
+    if PRX1TYPE:get() == param_num_topradar_prx_backend or PRX1TYPE:get() == param_num_nanoradar_prx_backend or PRX1TYPE:get() == param_num_lightware_rfnd or PRX1TYPE:get() == 0 then
+        isMicrobrainPRX = false
     end
 
     if not lua_rfnd_driver_found and isMicrobrainRFND then
