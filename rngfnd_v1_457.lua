@@ -230,6 +230,37 @@ function Handle_prx_frame(frame_prx, prx_orientation_yaw_deg)
     end
 end
 
+---------------------------------- MAIN --------------------------------
+-- @calibrateGravimetric(): Performs a gravimetric calibration on the strain gauges
+function CalibrateGravimetric(CAN_driver, weight)
+    local calibrationWeightHigh = math.floor((weight) / 256)
+    local calibrationWeightLow = (weight) % 256
+
+    local calibrateMessage = GetCANMessage(0xF2, 0x88, 0x0, 0x0, 0xF7, calibrationWeightHigh, calibrationWeightLow, 0x0, 0x0, 0xF1, 0xF3, 0x0)
+    CAN_driver:write_frame(calibrateMessage, 50) -- Send CAN_msg and set 50 us timeout
+end
+
+-- @calibrateTare(): Performs a tare calibration on the weight modules
+function CalibrateTare(CAN_driver)
+    local calibrateMessage = GetCANMessage(0xF2, 0x88, 0x0, 0x0, 0xF6, 0x0, 0x0, 0x0, 0x0, 0xF1, 0xF3, 0x0)
+    CAN_driver:write_frame(calibrateMessage, 50) -- Send CAN_msg and set 50 us timeout    
+end
+
+-- @getCANMessage(): Returns an extended CAN msg
+function GetCANMessage(id_b1, id_b2, id_b3, id_b4, b1, b2, b3, b4, b5, b6, b7, b8)
+    local msg = CANFrame()
+    msg:id(uint32_t(1) << 31 | uint32_t(id_b4) << 24 | uint32_t(id_b3) << 16 | uint32_t(id_b2) << 8 | uint32_t(id_b1)) -- Set the extended CAN ID (0x88F2)
+    msg:data(0, b1) -- Switch source to signal switching
+    msg:data(1, b2) -- Switch to CANBUS mode
+    msg:data(2, b3) -- Empty
+    msg:data(3, b4) -- Empty
+    msg:data(4, b5) -- Empty
+    msg:data(5, b6) -- Empty
+    msg:data(6, b7) -- Empty
+    msg:data(7, b8) -- Empty
+    msg:dlc(8)-- sending 8 bytes of data
+    return msg
+end
 
 -- -------------------------------- BATT --------------------------------
 function SendHeartbeat()
@@ -397,6 +428,10 @@ function Update()
         Setup_rfnd_sensor()
     end
 
+    if not lua_prx_driver_found and isMicrobrainPRX then
+        Setup_prx_sensor()
+    end
+
     if batt_counter > 2000 then
         SendHeartbeat()
         batt_counter = 0 
@@ -408,6 +443,46 @@ function Update()
     if not frame then
         -- no frame to parse
         return
+    end
+
+    if (tostring(frame:id()) == "2147485468") then
+        --gcs:send_text(MAV_SEVERITY_EMERGENCY, "PASSEI AQUI 2" .. sensor_select:get())
+        Handle_prx_frame(frame, 0)
+    end
+
+    if (tostring(frame:id()) == "2147485484") then
+        --gcs:send_text(MAV_SEVERITY_EMERGENCY, "PASSEI AQUI 3" .. sensor_select:get())
+        Handle_prx_frame(frame, 180)
+    end
+
+     ------- WEIGHT MODULES CAN -------
+     if tostring(frame:id()) == "2147518546" then -- Weight modules CAN frame
+        local tank_weight = frame:data(1)*256 + frame:data(2)
+        gcs:send_named_float('TANK_WEIGHT', tank_weight)
+    end
+
+    -- If 5 seconds have passed since last access of parameters, check if they have been changed
+    if millis() - lastAccessParameters > 5000 then
+
+        local graviParam = Parameter()
+        if graviParam:init("USR_CALIB_GRAVI") then
+            local graviCalibValue = graviParam:get()
+            if graviCalibValue > 0 then
+                CalibrateGravimetric(can_driver, graviCalibValue)
+                graviParam:set_and_save(0)
+            end
+        end
+
+        local tareParam = Parameter()
+        if tareParam:init("USR_CALIB_TARE") then
+            local shouldCalibTare = tareParam:get()
+            if shouldCalibTare > 0 then
+                CalibrateTare(can_driver)
+                tareParam:set_and_save(0)
+            end
+        end
+        
+        lastAccessParameters = millis()
     end
 
 
