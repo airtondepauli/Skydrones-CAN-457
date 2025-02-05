@@ -223,17 +223,19 @@ function Handle_prx_frame(frame_prx, prx_orientation_yaw_deg)
 
     local object_x_cm, object_y_cm = Parse_can_frame(frame_prx)
     local object_valid = false
-    if (object_y_cm >= 0) then
+    if (object_y_cm >= 0 and object_y_cm >= 0) then
         object_valid = true
     end
 
     if object_valid then
         local object_distance = math.sqrt(object_x_cm * object_x_cm + object_y_cm * object_y_cm)
         local sent_success = lua_prx_backend:handle_script_distance_msg(object_distance, prx_orientation_yaw_deg, 0, true)
-        if not sent_success then
-            gcs:send_text(MAV_SEVERITY_EMERGENCY, string.format("Proximity Lua Script Error"))
-            return
-        end
+        --if not sent_success then
+        --    gcs:send_text(MAV_SEVERITY_EMERGENCY, string.format("Proximity Lua Script Error"))
+        --    return
+        --end
+    else
+        lua_prx_backend:handle_script_distance_msg(0, prx_orientation_yaw_deg, 0, true)
     end
 end
 
