@@ -110,6 +110,9 @@ local COPTER_AUTO_MODE = 3
 -- ULTRA FLOW 
 local CONT_FLOW_NOTIFY = 0
 
+-- AGRO CONTROL TO AVOID MULTIPLE CALLS TO MODE CHANGE
+local HasSwitchedToRTL = false
+
 local lastAccessParameters = millis()
 
 function SEND_MSG_WITH_REC(msg, notification_rate, globalCounter)
