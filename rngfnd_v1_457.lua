@@ -102,6 +102,10 @@ local ALT_HOLD_TIMER = 0
 -- VEHICLE MODES
 local COPTER_LAND_MODE = 9
 local COPTER_ALT_HOLD = 2
+local COPTER_RTL_MODE = 6
+local COPTER_LOITER_MODE = 5
+local COPTER_AUTO_MODE = 3
+
 
 -- ULTRA FLOW 
 local CONT_FLOW_NOTIFY = 0
@@ -438,6 +442,31 @@ function Update()
     end
 
     batt_counter = batt_counter + 1
+    local remaining = battery:capacity_remaining_pct(0)
+
+    if remaining ~= nil and remaining <= 30 and FAIL_TIMER >= 5000 and remaining > 20 then
+        gcs:send_text(MAV_SEVERITY_EMERGENCY, "Pouca Bateria, retornando para casa")
+        gcs:send_text(MAV_SEVERITY_EMERGENCY, "<SKY>Mode_set_reason:FAILSAFE_BAT\n")
+        if not HasSwitchedToRTL then
+            vehicle:set_mode(COPTER_RTL_MODE)
+            HasSwitchedToRTL = true
+        end
+        FAIL_TIMER = 0
+    end
+
+    if remaining ~= nil and remaining <= 10 and LAND_TIMER >= 8000 then
+        gcs:send_text(MAV_SEVERITY_EMERGENCY, "BATERIA FRACA - POUSANDO")
+        gcs:send_text(MAV_SEVERITY_EMERGENCY, "<SKY>Mode_set_reason:FAILSAFE_BAT\n")
+        vehicle:set_mode(COPTER_LAND_MODE)
+        LAND_TIMER = 0
+    end
+
+    FAIL_TIMER = FAIL_TIMER + 1
+    LAND_TIMER = LAND_TIMER + 1
+    if FAIL_TIMER >= 15000 or LAND_TIMER >= 15000 then
+        FAIL_TIMER = 0
+        LAND_TIMER = 0
+    end
 
     local frame = can_driver:read_frame()
     if not frame then
